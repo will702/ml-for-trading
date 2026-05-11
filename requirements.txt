@@ -1,0 +1,16 @@
+yfinance
+pandas
+numpy
+scikit-learn
+xgboost
+lightgbm
+statsmodels
+fastapi
+uvicorn
+streamlit
+matplotlib
+seaborn
+pyarrow
+scipy
+joblib
+python-multipart
