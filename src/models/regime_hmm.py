@@ -14,7 +14,7 @@ class HMMRegimeDetector:
         2 = Bear   (lowest mean return)
     """
 
-    def __init__(self, n_components=3, covariance_type="full", n_iter=100):
+    def __init__(self, n_components=3, covariance_type="diag", n_iter=100):
         self.n_components = n_components
         self.covariance_type = covariance_type
         self.n_iter = n_iter
