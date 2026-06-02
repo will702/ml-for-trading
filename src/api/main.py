@@ -237,7 +237,14 @@ def get_portfolio(request: PortfolioRequest):
     method = request.method.lower()
 
     # Fetch returns
-    data = yf.download(tickers, period="1y", progress=False)["Close"]
+    raw = yf.download(tickers, period="1y", progress=False)
+    if raw.empty:
+        raise HTTPException(status_code=503, detail="Failed to fetch price data from yfinance")
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [col[0] for col in raw.columns]
+    if "Close" not in raw.columns:
+        raise HTTPException(status_code=503, detail="No Close price data returned")
+    data = raw["Close"]
     if isinstance(data, pd.Series):
         data = data.to_frame()
     returns = np.log(data / data.shift(1)).dropna()

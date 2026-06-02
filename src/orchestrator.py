@@ -422,12 +422,7 @@ class QuantOrchestrator:
         # 6. Build and cache full inference bundle from newly trained models
         try:
             loaded = self._load_cached_models(ticker)
-            scaler_path = os.path.join(self.models_dir, f"scaler_{ticker}.joblib")
-            if os.path.exists(scaler_path):
-                scaler_obj = joblib.load(scaler_path)
-                X_latest = X_all_scaled.iloc[[-1]]
-            else:
-                X_latest = X_all_scaled.iloc[[-1]]
+            X_latest = X_all_scaled.iloc[[-1]]
 
             anomaly_flag_retrain = None
             anomaly_score_retrain = None
@@ -455,8 +450,6 @@ class QuantOrchestrator:
                 self._last_retrain[ticker] = datetime.now()
         except Exception:
             logger.exception("Cache bundle build failed after retrain for %s", ticker)
-            with self._lock:
-                self._last_retrain[ticker] = datetime.now()
 
         logger.info("weekly_retrain complete for %s", ticker)
 
