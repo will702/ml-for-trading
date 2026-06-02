@@ -5,11 +5,14 @@ import joblib
 from src.features.technical_indicators import add_technical_indicators
 from src.features.preprocessing import triple_barrier_labeling, prepare_features_and_labels, walk_forward_split
 from src.models.model_wrappers import ModelWrapper, calculate_financial_metrics, run_arima_benchmark
-from sklearn.metrics import accuracy_score, classification_report
+from src.models.market_regime import MarketRegimeDetector
+from src.models.backtester import run_advanced_backtest
+from sklearn.metrics import accuracy_score
 
 def run_benchmarking(ticker, start_date, end_date):
     # 1. Load Data
     raw_path = f"data/raw/{ticker}_{start_date}_{end_date}.parquet"
+    print(f"Loading data from {raw_path}...")
     if not os.path.exists(raw_path):
         print(f"Data not found at {raw_path}. Please run data ingestion first.")
         return
@@ -28,31 +31,64 @@ def run_benchmarking(ticker, start_date, end_date):
     # 5. Walk-Forward Split
     X_train, X_test, y_train, y_test = walk_forward_split(X, y)
     
-    # 6. Benchmarking
+    # 6. Fit Market Regime Detector (on all historical indicators)
+    print("Training Market Regime Detector (GMM)...")
+    regime_features = df[['Log_Returns', 'Volatility']].dropna()
+    regime_detector = MarketRegimeDetector(n_regimes=3)
+    regime_detector.fit(regime_features)
+    
+    # Save regime detector
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(regime_detector, f"models/regime_detector_{ticker}.joblib")
+    print(f"Regime detector saved to models/regime_detector_{ticker}.joblib")
+    
+    # 7. Benchmarking
     results = {}
     models = ['SVM', 'RandomForest', 'XGBoost', 'LightGBM']
     
     test_prices = df.loc[X_test.index, 'Close']
+    test_vols = df.loc[X_test.index, 'Volatility'].values
+    test_sma_50 = df.loc[X_test.index, 'SMA_50'].values
+    test_trend = test_prices.values > test_sma_50
     
     for model_name in models:
         print(f"Training {model_name}...")
         wrapper = ModelWrapper(model_name)
         wrapper.train(X_train, y_train)
         preds = wrapper.predict(X_test)
+        probas = wrapper.predict_proba(X_test)
         
         # Statistical Metrics
         acc = accuracy_score(y_test, preds)
         
-        # Financial Metrics
+        # Financial Metrics - Base (Hold always)
         fin_metrics = calculate_financial_metrics(y_test, preds, test_prices)
+        
+        # Financial Metrics - Advanced (Kelly Sizing, Stop Loss=1.5%, Profit Target=3.0%, Trailing Stop=2.0%)
+        adv_backtest = run_advanced_backtest(
+            prices=test_prices,
+            signals=preds,
+            probabilities=probas,
+            volatilities=test_vols,
+            trend_filter=test_trend,
+            sizing_method="kelly",
+            stop_loss=0.015,
+            profit_taking=0.03,
+            trailing_stop=0.02,
+            time_barrier=5
+        )
         
         results[model_name] = {
             "Accuracy": acc,
-            **fin_metrics
+            "Total Return (Base)": fin_metrics["Total Return"],
+            "Sharpe Ratio (Base)": fin_metrics["Sharpe Ratio"],
+            "Max Drawdown (Base)": fin_metrics["Max Drawdown"],
+            "Total Return (Adv)": adv_backtest["Total Return"],
+            "Sharpe Ratio (Adv)": adv_backtest["Sharpe Ratio"],
+            "Max Drawdown (Adv)": adv_backtest["Max Drawdown"],
         }
         
         # Save model
-        os.makedirs("models", exist_ok=True)
         joblib.dump(wrapper.model, f"models/{model_name}_{ticker}.joblib")
     
     # ARIMA Special Handling
@@ -64,22 +100,45 @@ def run_benchmarking(ticker, start_date, end_date):
     
     # Convert ARIMA forecast to signals (1 if pos return, -1 if neg)
     arima_signals = np.where(arima_preds_raw > 0, 1, -1)
-    # Match labels for accuracy calculation (simplified)
-    # y_test_returns = np.where(log_returns.values[train_size:] > 0, 1, -1)
-    # arima_acc = accuracy_score(y_test_returns, arima_signals)
     
-    # For comparison, we'll just calculate financial metrics for ARIMA
-    arima_fin = calculate_financial_metrics(None, arima_signals, df['Close'].iloc[train_size+1:])
+    # For comparison, we'll calculate financial metrics for ARIMA
+    arima_prices = df['Close'].iloc[train_size+1:]
+    arima_vols = df['Volatility'].iloc[train_size+1:].values
+    arima_sma_50 = df['SMA_50'].iloc[train_size+1:].values
+    arima_trend = arima_prices.values > arima_sma_50
+    
+    arima_fin = calculate_financial_metrics(None, arima_signals, arima_prices)
+    
+    # ARIMA Advanced (Volatility Sizing, SL 1.5%, PT 3.0%, TS 2.0%)
+    arima_adv = run_advanced_backtest(
+        prices=arima_prices,
+        signals=arima_signals,
+        probabilities=None,
+        volatilities=arima_vols,
+        trend_filter=arima_trend,
+        sizing_method="volatility",
+        stop_loss=0.015,
+        profit_taking=0.03,
+        trailing_stop=0.02,
+        time_barrier=5
+    )
+    
     results["ARIMA"] = {
         "Accuracy": "N/A (Forecasting)",
-        **arima_fin
+        "Total Return (Base)": arima_fin["Total Return"],
+        "Sharpe Ratio (Base)": arima_fin["Sharpe Ratio"],
+        "Max Drawdown (Base)": arima_fin["Max Drawdown"],
+        "Total Return (Adv)": arima_adv["Total Return"],
+        "Sharpe Ratio (Adv)": arima_adv["Sharpe Ratio"],
+        "Max Drawdown (Adv)": arima_adv["Max Drawdown"],
     }
     
-    # 7. Summary
+    # 8. Summary
     results_df = pd.DataFrame(results).T
     print("\nBenchmarking Results:")
     print(results_df)
     
+    os.makedirs("data/processed", exist_ok=True)
     results_df.to_csv(f"data/processed/{ticker}_benchmarking_results.csv")
     print(f"\nResults saved to data/processed/{ticker}_benchmarking_results.csv")
     
@@ -93,3 +152,4 @@ if __name__ == "__main__":
     start = "2020-01-01"
     end = "2026-05-11" # Current session date
     run_benchmarking(ticker, start, end)
+

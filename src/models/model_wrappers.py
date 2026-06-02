@@ -21,7 +21,7 @@ class ModelWrapper:
 
     def _build_model(self, model_name):
         if model_name == "SVM":
-            return SVC(kernel="rbf", C=1.0, gamma="scale", random_state=self.random_state)
+            return SVC(kernel="rbf", C=1.0, gamma="scale", probability=True, random_state=self.random_state)
         if model_name == "RandomForest":
             return RandomForestClassifier(
                 n_estimators=200,
@@ -72,6 +72,30 @@ class ModelWrapper:
         if self._class_to_label:
             preds = pd.Series(preds).map(self._class_to_label).to_numpy()
         return preds
+
+    def predict_proba(self, X_test):
+        if not hasattr(self.model, "predict_proba"):
+            n_samples = len(X_test)
+            return np.ones((n_samples, 3)) / 3.0
+            
+        probas_raw = self.model.predict_proba(X_test)
+        n_samples = len(X_test)
+        aligned_probas = np.zeros((n_samples, 3))
+        
+        # Target classes are [-1, 0, 1]
+        target_classes = [-1, 0, 1]
+        
+        if self.model_name == "XGBoost" and self._class_to_label:
+            model_classes = [self._class_to_label[i] for i in range(len(self.model.classes_))]
+        else:
+            model_classes = self.model.classes_
+            
+        for i, cls in enumerate(model_classes):
+            if cls in target_classes:
+                target_idx = target_classes.index(cls)
+                aligned_probas[:, target_idx] = probas_raw[:, i]
+                
+        return aligned_probas
 
 
 def calculate_financial_metrics(y_true, predictions, prices):
