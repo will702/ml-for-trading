@@ -405,15 +405,17 @@ class QuantOrchestrator:
                     model=raw_model,
                     feature_names=list(X_all_scaled.columns),
                 )
-                # Pre-compute importances on training data (stores explainer state)
-                explainer.get_feature_importance(X_all_scaled.values)
+                # Compute importances and save only the result dict.
+                # Saving the whole ModelExplainer fails for SVM: KernelExplainer
+                # caches a Cython _memoryviewslice that joblib cannot pickle.
+                importances = explainer.get_feature_importance(X_all_scaled.values)
                 joblib.dump(
-                    explainer,
+                    importances,
                     os.path.join(
                         self.models_dir, f"explainer_{model_name}_{ticker}.joblib"
                     ),
                 )
-                logger.info("ModelExplainer saved for %s/%s", model_name, ticker)
+                logger.info("SHAP importances saved for %s/%s", model_name, ticker)
             except Exception:
                 logger.exception(
                     "ModelExplainer fit/save failed for %s/%s", model_name, ticker
@@ -682,21 +684,11 @@ class QuantOrchestrator:
         bundle["anomaly_score"] = anomaly_score
 
         # ── SHAP importances ──────────────────────────────────────────────
+        # Artifact is a precomputed {feature: float} dict (not a ModelExplainer).
         shap_importances: dict[str, Optional[dict]] = {}
         for model_name in _ML_MODELS:
-            explainer = loaded_models.get(f"explainer_{model_name}")
-            if explainer is not None:
-                try:
-                    shap_importances[model_name] = explainer.get_feature_importance(
-                        X_scaled.values
-                    )
-                except Exception:
-                    logger.exception(
-                        "SHAP importance failed for %s/%s", model_name, ticker
-                    )
-                    shap_importances[model_name] = None
-            else:
-                shap_importances[model_name] = None
+            artifact = loaded_models.get(f"explainer_{model_name}")
+            shap_importances[model_name] = artifact if isinstance(artifact, dict) else None
         bundle["shap_importances"] = shap_importances
 
         # ── Timestamp ─────────────────────────────────────────────────────
