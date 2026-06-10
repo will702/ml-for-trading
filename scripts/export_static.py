@@ -6,11 +6,13 @@ Trains all models (via QuantOrchestrator.weekly_retrain) and exports
 per-ticker JSON snapshots + supporting JSON files to docs/data/.
 
 Usage:
-    python scripts/export_static.py
+    python scripts/export_static.py               # full train + export
+    python scripts/export_static.py --skip-train  # export from existing artifacts
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -77,8 +79,9 @@ class SafeEncoder(json.JSONEncoder):
             return [self._clean(x) for x in obj.tolist()]
         if isinstance(obj, pd.Timestamp):
             return str(obj.date())
-        if isinstance(obj, bool):
-            return obj
+        # np.bool_ is NOT a subclass of Python bool in NumPy 2.x
+        if isinstance(obj, (bool, np.bool_)):
+            return bool(obj)
         if isinstance(obj, dict):
             return {k: self._clean(v) for k, v in obj.items()}
         if isinstance(obj, (list, tuple)):
@@ -106,44 +109,108 @@ def _date_str(idx) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _populate_cache_from_disk(ticker: str, orch: QuantOrchestrator) -> None:
+    """Load existing disk artifacts and populate orch._cache without retraining."""
+    df = _load_df(ticker)
+
+    loaded = orch._load_cached_models(ticker)
+
+    if loaded.get("scaler") is None:
+        raise RuntimeError(f"scaler_{ticker}.joblib not found — run training first")
+
+    ohlcv_cols = ["Open", "High", "Low", "Close", "Volume", "Adj Close"]
+    feat_df = df.drop(columns=[c for c in ohlcv_cols if c in df.columns]).dropna()
+
+    X_scaled = pd.DataFrame(
+        loaded["scaler"].transform(feat_df.values[-1:]),
+        columns=feat_df.columns,
+        index=feat_df.index[-1:],
+    )
+
+    anomaly_flag, anomaly_score = None, None
+    anomaly_det = loaded.get("anomaly_detector")
+    if anomaly_det is not None:
+        try:
+            anomaly_flag = bool(anomaly_det.is_anomaly(X_scaled.values))
+            anomaly_score = float(anomaly_det.score_samples(X_scaled.values)[0])
+        except Exception:
+            pass
+
+    bundle = orch._build_inference_bundle(
+        ticker=ticker,
+        df=df,
+        X_scaled=X_scaled,
+        loaded_models=loaded,
+        anomaly_flag=anomaly_flag,
+        anomaly_score=anomaly_score,
+    )
+
+    with orch._lock:
+        orch._cache[ticker] = bundle
+        orch._last_retrain[ticker] = datetime.now()
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Export static GitHub Pages data")
+    parser.add_argument(
+        "--skip-train",
+        action="store_true",
+        help="Skip data fetch + training; use artifacts already in models/",
+    )
+    args = parser.parse_args()
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, "raw"), exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, "processed"), exist_ok=True)
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    # ── Step 1: pre-fetch raw data (synthetic fallback ON → CI never flakes) ──
-    print("=" * 60)
-    print("STEP 1: Fetching / pre-fetching OHLCV data")
-    print("=" * 60)
-    for ticker in TICKERS:
-        print(f"\n[{ticker}] Fetching {START_DATE} → {END_DATE} …")
-        fetch_stock_data(
-            ticker, START_DATE, END_DATE,
-            os.path.join(DATA_DIR, "raw"),
-            allow_synthetic_fallback=True,
-        )
-
-    # ── Step 2: train models ──────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("STEP 2: Training models via QuantOrchestrator.weekly_retrain")
-    print("=" * 60)
     orch = QuantOrchestrator(
         tickers=TICKERS,
         data_dir=DATA_DIR,
         models_dir=MODELS_DIR,
     )
-    # Do NOT call orch.start() — we don't want the APScheduler or the
-    # auto-retrain loop that fires for missing models. Call directly per-ticker.
-    for ticker in TICKERS:
-        print(f"\n[{ticker}] weekly_retrain …")
-        try:
-            orch.weekly_retrain(ticker)
-            print(f"[{ticker}] Done.")
-        except Exception as exc:
-            print(f"[{ticker}] ERROR: {exc}")
-            import traceback
-            traceback.print_exc()
+
+    if args.skip_train:
+        # ── Fast path: load existing artifacts, no retraining ────────────────
+        print("=" * 60)
+        print("STEP 1+2 (skipped): Using existing artifacts in models/")
+        print("=" * 60)
+        for ticker in TICKERS:
+            print(f"\n[{ticker}] Loading from disk …")
+            try:
+                _populate_cache_from_disk(ticker, orch)
+                print(f"[{ticker}] Done.")
+            except Exception as exc:
+                print(f"[{ticker}] ERROR: {exc}")
+                import traceback
+                traceback.print_exc()
+    else:
+        # ── Full path: fetch data then retrain ───────────────────────────────
+        print("=" * 60)
+        print("STEP 1: Fetching / pre-fetching OHLCV data")
+        print("=" * 60)
+        for ticker in TICKERS:
+            print(f"\n[{ticker}] Fetching {START_DATE} → {END_DATE} …")
+            fetch_stock_data(
+                ticker, START_DATE, END_DATE,
+                os.path.join(DATA_DIR, "raw"),
+                allow_synthetic_fallback=True,
+            )
+
+        print("\n" + "=" * 60)
+        print("STEP 2: Training models via QuantOrchestrator.weekly_retrain")
+        print("=" * 60)
+        # Do NOT call orch.start() — we don't want the APScheduler or the
+        # auto-retrain loop that fires for missing models. Call directly per-ticker.
+        for ticker in TICKERS:
+            print(f"\n[{ticker}] weekly_retrain …")
+            try:
+                orch.weekly_retrain(ticker)
+                print(f"[{ticker}] Done.")
+            except Exception as exc:
+                print(f"[{ticker}] ERROR: {exc}")
+                import traceback
+                traceback.print_exc()
 
     # ── Step 3: per-ticker JSON ───────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -202,12 +269,23 @@ def main() -> None:
 
 
 def _load_df(ticker: str) -> pd.DataFrame:
-    """Load the most recent parquet for ticker and add technical indicators."""
+    """Load the largest (most complete) parquet for ticker and add technical indicators."""
     raw_dir = os.path.join(DATA_DIR, "raw")
-    candidates = sorted(f for f in os.listdir(raw_dir) if f.startswith(ticker) and f.endswith(".parquet"))
+    # Exclude *_latest.parquet — it only contains the last 90 days from daily_refresh
+    candidates = [
+        f for f in os.listdir(raw_dir)
+        if f.startswith(ticker) and f.endswith(".parquet") and "latest" not in f
+    ]
+    if not candidates:
+        candidates = [
+            f for f in os.listdir(raw_dir)
+            if f.startswith(ticker) and f.endswith(".parquet")
+        ]
     if not candidates:
         raise FileNotFoundError(f"No parquet found for {ticker} in {raw_dir}")
-    df = pd.read_parquet(os.path.join(raw_dir, candidates[-1]))
+    # Pick the file with the most data (largest size = most rows)
+    best = max(candidates, key=lambda f: os.path.getsize(os.path.join(raw_dir, f)))
+    df = pd.read_parquet(os.path.join(raw_dir, best))
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
     return add_technical_indicators(df)
@@ -439,9 +517,15 @@ def _build_portfolio_payload(tickers: list[str]) -> dict:
     raw_dir = os.path.join(DATA_DIR, "raw")
     prices_dict = {}
     for t in tickers:
-        candidates = sorted(f for f in os.listdir(raw_dir) if f.startswith(t) and f.endswith(".parquet"))
+        cands = [f for f in os.listdir(raw_dir)
+                 if f.startswith(t) and f.endswith(".parquet") and "latest" not in f]
+        if not cands:
+            cands = [f for f in os.listdir(raw_dir)
+                     if f.startswith(t) and f.endswith(".parquet")]
+        candidates = cands
         if candidates:
-            df_t = pd.read_parquet(os.path.join(raw_dir, candidates[-1]))
+            best_f = max(candidates, key=lambda f: os.path.getsize(os.path.join(raw_dir, f)))
+            df_t = pd.read_parquet(os.path.join(raw_dir, best_f))
             if isinstance(df_t.columns, pd.MultiIndex):
                 df_t.columns = [col[0] for col in df_t.columns]
             prices_dict[t] = df_t["Close"]
