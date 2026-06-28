@@ -1,0 +1,39 @@
+# Virtual Environment
+venv/
+.venv/
+ENV/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Data (Large binary or CSV files)
+data/raw/
+data/processed/
+
+# Model Artifacts
+/models/
+*.joblib
+*.pkl
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Environment Variables
+.env
+.streamlit/secrets.toml
+
+# AI & Agent related
+.agents/
+.gemini/
+conductor/
+GEMINI.md
+skills-lock.json
+*.pen
+
+# docs/data/ is committed directly (manually exported via scripts/export_static.py --skip-train)
